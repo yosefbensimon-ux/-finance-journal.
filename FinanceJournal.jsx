@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, Minus, Search, CalendarPlus, BarChart3,
   X, ChevronRight, ChevronLeft, Paperclip, Trash2, ChevronDown,
@@ -180,6 +180,8 @@ export default function FinanceJournal({ session }) {
   const [fabOpen, setFabOpen] = useState(false);
   const [colorPickerFor, setColorPickerFor] = useState(null);
   const [now, setNow] = useState(new Date());
+  const [lastDeleted, setLastDeleted] = useState(null);
+  const undoTimerRef = useRef(null);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -232,10 +234,12 @@ export default function FinanceJournal({ session }) {
   }
   async function deleteEntry(id) {
     const prev = entries;
+    const deletedItem = entries.find((e) => e.id === id);
     setEntries(entries.filter((e) => e.id !== id));
     const { error } = await supabase.from("entries").delete().eq("id", id);
-    if (error) { setError(error.message); setEntries(prev); }
+    if (error) { setError(error.message); setEntries(prev); return; }
     if (editingEntryId === id) { setShowForm(false); setEditingEntryId(null); }
+    if (deletedItem) { setLastDeleted({ kind: "entry", data: deletedItem }); scheduleUndoClear(); }
   }
   function duplicateEntry(entry) {
     const copy = { ...entry };
@@ -258,9 +262,11 @@ export default function FinanceJournal({ session }) {
   }
   async function deleteParty(id) {
     const prev = parties;
+    const deletedItem = parties.find((p) => p.id === id);
     setParties(parties.filter((p) => p.id !== id));
     const { error } = await supabase.from("parties").delete().eq("id", id);
-    if (error) { setError(error.message); setParties(prev); }
+    if (error) { setError(error.message); setParties(prev); return; }
+    if (deletedItem) { setLastDeleted({ kind: "party", data: deletedItem }); scheduleUndoClear(); }
   }
 
   async function addReminder(r) {
@@ -279,10 +285,12 @@ export default function FinanceJournal({ session }) {
   }
   async function deleteReminder(id) {
     const prev = reminders;
+    const deletedItem = reminders.find((r) => r.id === id);
     setReminders(reminders.filter((r) => r.id !== id));
     const { error } = await supabase.from("reminders").delete().eq("id", id);
-    if (error) { setError(error.message); setReminders(prev); }
+    if (error) { setError(error.message); setReminders(prev); return; }
     if (editingReminderId === id) { setShowReminderForm(false); setEditingReminderId(null); }
+    if (deletedItem) { setLastDeleted({ kind: "reminder", data: deletedItem }); scheduleUndoClear(); }
   }
   function duplicateReminder(reminder) {
     const copy = { ...reminder };
@@ -299,6 +307,20 @@ export default function FinanceJournal({ session }) {
     const payload = next.map(({ id, color, visible }) => ({ id, color, visible }));
     const { error } = await supabase.from("settings").upsert({ user_id: userId, categories: payload, updated_at: new Date().toISOString() });
     if (error) setError(error.message);
+  }
+
+  function scheduleUndoClear() {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setLastDeleted(null), 7000);
+  }
+  async function undoDelete() {
+    if (!lastDeleted) return;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    const { kind, data } = lastDeleted;
+    setLastDeleted(null);
+    if (kind === "entry") await addEntry(data);
+    else if (kind === "party") await addParty(data);
+    else if (kind === "reminder") await addReminder(data);
   }
 
   function catById(id) { return categories.find((c) => c.id === id) || categories[categories.length - 1]; }
@@ -770,6 +792,14 @@ export default function FinanceJournal({ session }) {
       </div>
       {fabOpen && <div onClick={() => setFabOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 35 }} />}
       {colorPickerFor && <div onClick={() => setColorPickerFor(null)} style={{ position: "fixed", inset: 0, zIndex: 15 }} />}
+
+      {lastDeleted && (
+        <div style={{ position: "fixed", bottom: "1.6rem", right: "1.6rem", zIndex: 300, background: INK, color: "#fff", borderRadius: "0.6rem", padding: "0.7rem 1rem", display: "flex", alignItems: "center", gap: "1rem", boxShadow: "0 8px 24px rgba(0,0,0,0.3)", fontSize: "0.85rem" }}>
+          <span>נמחק</span>
+          <button onClick={undoDelete} style={{ background: "none", border: "none", color: "#7FB0FF", fontWeight: 700, cursor: "pointer", fontSize: "0.85rem" }}>בטל</button>
+          <button onClick={() => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current); setLastDeleted(null); }} style={{ background: "none", border: "none", color: "#9AA0A6", cursor: "pointer", display: "flex" }}><X size={14} /></button>
+        </div>
+      )}
 
       {contextMenu && (
         <div onClick={closeContextMenu} onContextMenu={(ev) => { ev.preventDefault(); closeContextMenu(); }} style={{ position: "fixed", inset: 0, zIndex: 90 }}>
