@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Plus, Minus, Search, CalendarPlus, BarChart3,
   X, ChevronRight, ChevronLeft, Paperclip, Trash2, ChevronDown,
-  Users, ArrowUpDown, Pencil, Check, Bell, LogOut
+  Users, ArrowUpDown, Pencil, Check, Bell, LogOut, Copy, Landmark, Clock
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -33,10 +33,17 @@ const SNOOZE_OPTIONS = [
   { id: "none", label: "בלי נודניק" }, { id: "5", label: "נודניק כל 5 דקות" }, { id: "10", label: "נודניק כל 10 דקות" },
   { id: "30", label: "נודניק כל 30 דקות" }, { id: "60", label: "נודניק כל שעה" },
 ];
+const REMINDER_STATUSES = [
+  { id: "ongoing", label: "נמשך", color: "#1E8E5A" },
+  { id: "paused", label: "לא נמשך", color: "#C7920C" },
+  { id: "cancelled", label: "מבוטל", color: "#C5453D" },
+];
+function reminderStatusMeta(id) { return REMINDER_STATUSES.find((s) => s.id === id) || REMINDER_STATUSES[0]; }
 const ACCENT = "#3B6FC7";
 const INK = "#1F2328";
 const SLATE = "#5B6470";
 
+function uid(prefix) { return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 function formatILS(n) {
   const sign = n < 0 ? "-" : "";
@@ -48,6 +55,19 @@ function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function addDays(d, n) { const date = new Date(d); date.setDate(date.getDate() + n); return date; }
 function addMonths(d, n) { return new Date(d.getFullYear(), d.getMonth() + n, 1); }
 function iso(d) { return d.toISOString().slice(0, 10); }
+function fmtShort(d) { return new Intl.DateTimeFormat("he-IL", { day: "numeric", month: "short" }).format(d); }
+function periodWordFor(mode) {
+  if (mode === "יומי") return "היום";
+  if (mode === "חודשי") return "החודש";
+  if (mode === "שנתי") return "השנה";
+  return "השבוע";
+}
+function noEntriesMessage(mode) {
+  if (mode === "יומי") return "אין תנועות היום.";
+  if (mode === "חודשי") return "אין תנועות החודש.";
+  if (mode === "שנתי") return "אין תנועות השנה.";
+  return "אין תנועות השבוע.";
+}
 const DAY_LABELS = ["א׳", "ב׳", "ג׳", "ד׳", "ה׳", "ו׳", "ש׳"];
 
 const emptyForm = {
@@ -55,11 +75,11 @@ const emptyForm = {
   checkNumber: "", bankBranch: "", refNumber: "", partyId: "", partyName: "", partyType: "client",
   category: "misc", subCategory: "", project: "", status: "שולם", recurring: "חד־פעמי",
   installmentNum: "", installmentTotal: "", notes: "", tags: "",
+  bankReconciled: false, reconciliationDate: "",
 };
 const emptyParty = { name: "", type: "client", phone: "", idNumber: "", email: "", address: "", notes: "" };
-const emptyReminder = { title: "", date: todayISO(), time: "09:00", repeat: "none", snooze: "none", notes: "" };
+const emptyReminder = { title: "", date: todayISO(), time: "09:00", repeat: "none", snooze: "none", notes: "", status: "ongoing" };
 
-// map camelCase form -> snake_case db row
 function entryToRow(e, userId) {
   return {
     user_id: userId, type: e.type, amount: e.amount, value_date: e.valueDate, actual_date: e.actualDate || null,
@@ -70,9 +90,9 @@ function entryToRow(e, userId) {
     installment_num: e.installmentNum ? Number(e.installmentNum) : null,
     installment_total: e.installmentTotal ? Number(e.installmentTotal) : null,
     notes: e.notes || null, tags: e.tags || null,
+    bank_reconciled: e.bankReconciled || false, reconciliation_date: e.reconciliationDate || null,
   };
 }
-// map db row -> camelCase for UI
 function rowToEntry(r) {
   return {
     id: r.id, type: r.type, amount: Number(r.amount), valueDate: r.value_date, actualDate: r.actual_date || "",
@@ -81,6 +101,7 @@ function rowToEntry(r) {
     category: r.category, subCategory: r.sub_category || "", project: r.project || "", status: r.status || "",
     recurring: r.recurring || "", installmentNum: r.installment_num || "", installmentTotal: r.installment_total || "",
     notes: r.notes || "", tags: r.tags || "",
+    bankReconciled: r.bank_reconciled || false, reconciliationDate: r.reconciliation_date || "",
   };
 }
 function partyToRow(p, userId) {
@@ -90,10 +111,28 @@ function rowToParty(r) {
   return { id: r.id, name: r.name, type: r.type, phone: r.phone || "", idNumber: r.id_number || "", email: r.email || "", address: r.address || "", notes: r.notes || "" };
 }
 function reminderToRow(r, userId) {
-  return { user_id: userId, title: r.title, date: r.date, time: r.time, repeat: r.repeat, snooze: r.snooze, notes: r.notes || null };
+  return { user_id: userId, title: r.title, date: r.date, time: r.time, repeat: r.repeat, snooze: r.snooze, notes: r.notes || null, status: r.status || "ongoing" };
 }
 function rowToReminder(r) {
-  return { id: r.id, title: r.title, date: r.date, time: r.time || "", repeat: r.repeat || "none", snooze: r.snooze || "none", notes: r.notes || "" };
+  return { id: r.id, title: r.title, date: r.date, time: r.time || "", repeat: r.repeat || "none", snooze: r.snooze || "none", notes: r.notes || "", status: r.status || "ongoing" };
+}
+
+function Logo({ size = 36 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" aria-label="לוגו לוח הבקרה הפיננסי">
+      <defs>
+        <linearGradient id="logoSplit" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#3B6FC7" />
+          <stop offset="0.52" stopColor="#3B6FC7" />
+          <stop offset="0.52" stopColor="#1E8E5A" />
+          <stop offset="1" stopColor="#1E8E5A" />
+        </linearGradient>
+      </defs>
+      <rect width="40" height="40" rx="11" fill="url(#logoSplit)" />
+      <text x="20" y="26" textAnchor="middle" fontFamily="'Frank Ruhl Libre', Georgia, serif" fontWeight="700" fontSize="20" fill="#fff">₪</text>
+      <rect x="10" y="30" width="20" height="2" rx="1" fill="#fff" opacity="0.85" />
+    </svg>
+  );
 }
 
 export default function FinanceJournal({ session }) {
@@ -104,6 +143,7 @@ export default function FinanceJournal({ session }) {
   const [loaded, setLoaded] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState(null);
   const [showMore, setShowMore] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [partyQuery, setPartyQuery] = useState("");
@@ -119,10 +159,14 @@ export default function FinanceJournal({ session }) {
 
   const [reminders, setReminders] = useState([]);
   const [showReminderForm, setShowReminderForm] = useState(false);
+  const [editingReminderId, setEditingReminderId] = useState(null);
   const [reminderForm, setReminderForm] = useState(emptyReminder);
+
+  const [contextMenu, setContextMenu] = useState(null);
 
   const [weekAnchor, setWeekAnchor] = useState(new Date());
   const [monthCursor, setMonthCursor] = useState(startOfMonth(new Date()));
+  const [yearCursor, setYearCursor] = useState(new Date().getFullYear());
   const [viewMode, setViewMode] = useState("שבועי");
   const [partyFilter, setPartyFilter] = useState("all");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -130,6 +174,12 @@ export default function FinanceJournal({ session }) {
   const [error, setError] = useState("");
   const [fabOpen, setFabOpen] = useState(false);
   const [colorPickerFor, setColorPickerFor] = useState(null);
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -166,11 +216,23 @@ export default function FinanceJournal({ session }) {
     if (error) { setError(error.message); return; }
     setEntries((prev) => [rowToEntry(data), ...prev]);
   }
+  async function updateEntry(id, formData) {
+    const { data, error } = await supabase.from("entries").update(entryToRow(formData, userId)).eq("id", id).select().single();
+    if (error) { setError(error.message); return; }
+    setEntries((prev) => prev.map((e) => (e.id === id ? rowToEntry(data) : e)));
+  }
   async function deleteEntry(id) {
     const prev = entries;
     setEntries(entries.filter((e) => e.id !== id));
     const { error } = await supabase.from("entries").delete().eq("id", id);
     if (error) { setError(error.message); setEntries(prev); }
+    if (editingEntryId === id) { setShowForm(false); setEditingEntryId(null); }
+  }
+  function duplicateEntry(entry) {
+    const copy = { ...entry };
+    delete copy.id;
+    addEntry(copy);
+    jumpToDate(new Date(copy.valueDate + "T12:00:00"));
   }
 
   async function addParty(p) {
@@ -197,11 +259,26 @@ export default function FinanceJournal({ session }) {
     if (error) { setError(error.message); return; }
     setReminders((prev) => [rowToReminder(data), ...prev]);
   }
+  async function updateReminder(id, r) {
+    const { data, error } = await supabase.from("reminders").update(reminderToRow(r, userId)).eq("id", id).select().single();
+    if (error) { setError(error.message); return; }
+    setReminders((prev) => prev.map((x) => (x.id === id ? rowToReminder(data) : x)));
+  }
   async function deleteReminder(id) {
     const prev = reminders;
     setReminders(reminders.filter((r) => r.id !== id));
     const { error } = await supabase.from("reminders").delete().eq("id", id);
     if (error) { setError(error.message); setReminders(prev); }
+    if (editingReminderId === id) { setShowReminderForm(false); setEditingReminderId(null); }
+  }
+  function duplicateReminder(reminder) {
+    const copy = { ...reminder };
+    delete copy.id;
+    addReminder(copy);
+    jumpToDate(new Date(copy.date + "T12:00:00"));
+  }
+  function markReminderStatus(reminder, status) {
+    updateReminder(reminder.id, { ...reminder, status });
   }
 
   async function persistCategories(next) {
@@ -215,13 +292,36 @@ export default function FinanceJournal({ session }) {
   function setCategoryColor(id, color) { persistCategories(categories.map((c) => (c.id === id ? { ...c, color } : c))); }
   function toggleCategoryVisible(id) { persistCategories(categories.map((c) => (c.id === id ? { ...c, visible: !c.visible } : c))); }
 
-  function openForm(type) { setForm({ ...emptyForm, type, category: type === "income" ? "work_income" : "misc" }); setPartyQuery(""); setShowMore(false); setError(""); setShowForm(true); setFabOpen(false); }
+  function openForm(type) {
+    setEditingEntryId(null);
+    setForm({ ...emptyForm, type, category: type === "income" ? "work_income" : "misc" });
+    setPartyQuery(""); setShowMore(false); setError(""); setShowForm(true); setFabOpen(false);
+  }
+  function openEditForm(entry) {
+    setEditingEntryId(entry.id);
+    setForm({
+      type: entry.type, amount: String(Math.abs(entry.amount)), valueDate: entry.valueDate, actualDate: entry.actualDate || "",
+      paymentMethod: entry.paymentMethod || "העברה בנקאית", checkNumber: entry.checkNumber || "", bankBranch: entry.bankBranch || "",
+      refNumber: entry.refNumber || "", partyId: entry.partyId || "", partyName: entry.partyName || "", partyType: entry.partyType || "client",
+      category: entry.category, subCategory: entry.subCategory || "", project: entry.project || "", status: entry.status || "שולם",
+      recurring: entry.recurring || "חד־פעמי", installmentNum: entry.installmentNum || "", installmentTotal: entry.installmentTotal || "",
+      notes: entry.notes || "", tags: entry.tags || "",
+      bankReconciled: entry.bankReconciled || false, reconciliationDate: entry.reconciliationDate || "",
+    });
+    setPartyQuery(entry.partyName || "");
+    setShowMore(true); setError(""); setShowForm(true); setFabOpen(false);
+  }
+  function closeForm() { setShowForm(false); setEditingEntryId(null); }
   async function submitForm() {
     const val = parseFloat(form.amount);
     if (!val || val <= 0) { setError("הכנס סכום תקין"); return; }
     if (!form.valueDate) { setError("בחר תאריך"); return; }
-    await addEntry({ ...form, amount: form.type === "expense" ? -Math.abs(val) : Math.abs(val) });
+    const signed = { ...form, amount: form.type === "expense" ? -Math.abs(val) : Math.abs(val) };
+    if (editingEntryId) await updateEntry(editingEntryId, signed);
+    else await addEntry(signed);
+    jumpToDate(new Date(form.valueDate + "T12:00:00"));
     setShowForm(false);
+    setEditingEntryId(null);
   }
 
   const partyMatches = useMemo(() => {
@@ -251,11 +351,56 @@ export default function FinanceJournal({ session }) {
     return [...list].sort((a, b) => a.name.localeCompare(b.name, "he"));
   }, [parties, managerTypeFilter]);
 
-  function openReminderForm() { setReminderForm(emptyReminder); setShowReminderForm(true); setFabOpen(false); }
+  function openReminderForm() {
+    setEditingReminderId(null);
+    setReminderForm(emptyReminder);
+    setShowReminderForm(true);
+    setFabOpen(false);
+  }
+  function openEditReminderForm(r) {
+    setEditingReminderId(r.id);
+    setReminderForm({ title: r.title, date: r.date, time: r.time || "09:00", repeat: r.repeat || "none", snooze: r.snooze || "none", notes: r.notes || "", status: r.status || "ongoing" });
+    setError(""); setShowReminderForm(true); setFabOpen(false);
+  }
+  function closeReminderForm() { setShowReminderForm(false); setEditingReminderId(null); }
   async function saveReminder() {
     if (!reminderForm.title.trim() || !reminderForm.date) { setError("מלא כותרת ותאריך"); return; }
-    await addReminder(reminderForm);
+    if (editingReminderId) await updateReminder(editingReminderId, reminderForm);
+    else await addReminder(reminderForm);
+    jumpToDate(new Date(reminderForm.date + "T12:00:00"));
     setShowReminderForm(false);
+    setEditingReminderId(null);
+  }
+
+  // ---- context menu (right click) ----
+  function openContextMenu(ev, kind, item) {
+    ev.preventDefault();
+    const menuW = 160, menuH = kind === "reminder" ? 240 : 130;
+    let x = ev.clientX, y = ev.clientY;
+    if (typeof window !== "undefined") {
+      if (x + menuW > window.innerWidth) x = window.innerWidth - menuW - 8;
+      if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 8;
+    }
+    setContextMenu({ x, y, kind, item });
+  }
+  function closeContextMenu() { setContextMenu(null); }
+  function handleMenuEdit() {
+    if (!contextMenu) return;
+    if (contextMenu.kind === "entry") openEditForm(contextMenu.item);
+    else openEditReminderForm(contextMenu.item);
+    closeContextMenu();
+  }
+  function handleMenuDuplicate() {
+    if (!contextMenu) return;
+    if (contextMenu.kind === "entry") duplicateEntry(contextMenu.item);
+    else duplicateReminder(contextMenu.item);
+    closeContextMenu();
+  }
+  function handleMenuDelete() {
+    if (!contextMenu) return;
+    if (contextMenu.kind === "entry") deleteEntry(contextMenu.item.id);
+    else deleteReminder(contextMenu.item.id);
+    closeContextMenu();
   }
 
   const weekStart = useMemo(() => startOfWeek(weekAnchor), [weekAnchor]);
@@ -290,18 +435,50 @@ export default function FinanceJournal({ session }) {
     return map;
   }, [reminders, weekDays]);
 
+  // ---- period (view-mode aware) range used for totals / graph / day-month-year bodies ----
+  const periodRange = useMemo(() => {
+    if (viewMode === "יומי") {
+      const s = iso(weekAnchor);
+      return { start: s, end: s, label: new Intl.DateTimeFormat("he-IL", { day: "numeric", month: "long", year: "numeric" }).format(weekAnchor) };
+    }
+    if (viewMode === "חודשי") {
+      const s = iso(startOfMonth(monthCursor));
+      const endD = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0);
+      return { start: s, end: iso(endD), label: new Intl.DateTimeFormat("he-IL", { month: "long", year: "numeric" }).format(monthCursor) };
+    }
+    if (viewMode === "שנתי") {
+      return { start: `${yearCursor}-01-01`, end: `${yearCursor}-12-31`, label: String(yearCursor) };
+    }
+    const s = iso(weekStart), e = iso(addDays(weekStart, 6));
+    return { start: s, end: e, label: `${fmtShort(weekStart)} – ${fmtShort(addDays(weekStart, 6))}` };
+  }, [viewMode, weekAnchor, monthCursor, yearCursor, weekStart]);
+
+  const periodEntries = useMemo(
+    () => filteredEntries.filter((e) => e.valueDate >= periodRange.start && e.valueDate <= periodRange.end),
+    [filteredEntries, periodRange]
+  );
+  const periodIncome = periodEntries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
+  const periodExpense = periodEntries.filter((e) => e.amount < 0).reduce((s, e) => s + Math.abs(e.amount), 0);
+
   const categoryTotals = useMemo(() => {
     const map = {}; for (const c of categories) map[c.id] = 0;
-    for (const e of weekEntries) map[e.category] = (map[e.category] || 0) + Math.abs(e.amount);
+    for (const e of periodEntries) map[e.category] = (map[e.category] || 0) + Math.abs(e.amount);
     return categories.map((c) => ({ ...c, total: map[c.id] || 0 }));
-  }, [weekEntries, categories]);
-
+  }, [periodEntries, categories]);
   const maxCatTotal = Math.max(1, ...categoryTotals.map((c) => c.total));
-  const weekIncome = weekEntries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
-  const weekExpense = weekEntries.filter((e) => e.amount < 0).reduce((s, e) => s + Math.abs(e.amount), 0);
-  const weekRangeLabel = `${new Intl.DateTimeFormat("he-IL", { day: "numeric", month: "short" }).format(weekDays[0])} – ${new Intl.DateTimeFormat("he-IL", { day: "numeric", month: "short" }).format(weekDays[6])}`;
+
+  function jumpToDate(d) { setWeekAnchor(d); setMonthCursor(startOfMonth(d)); setYearCursor(d.getFullYear()); }
+  function goToday() { jumpToDate(new Date()); }
   function shiftWeek(delta) { setWeekAnchor(addDays(weekStart, delta * 7)); }
-  function jumpToDate(d) { setWeekAnchor(d); setMonthCursor(startOfMonth(d)); }
+  function shiftPeriod(delta) {
+    if (viewMode === "יומי") jumpToDate(addDays(weekAnchor, delta));
+    else if (viewMode === "חודשי") jumpToDate(addMonths(monthCursor, delta));
+    else if (viewMode === "שנתי") {
+      const ny = yearCursor + delta;
+      const d = new Date(ny, monthCursor.getMonth(), 1);
+      setYearCursor(ny); setMonthCursor(startOfMonth(d)); setWeekAnchor(d);
+    } else shiftWeek(delta);
+  }
 
   const reportRows = useMemo(() => {
     const map = {};
@@ -359,15 +536,19 @@ export default function FinanceJournal({ session }) {
         .mini-cell:hover { background: #EEF2FB; }
         .swatch { cursor:pointer; transition: transform 0.1s ease; }
         .swatch:hover { transform: scale(1.15); }
+        .month-cell:hover { background: #FAFBFD; }
+        .year-card:hover { border-color: ${ACCENT}; }
       `}</style>
 
       {/* Top bar */}
       <div style={{ padding: "0.85rem 1.5rem", background: "#fff", borderBottom: `1px solid #E1E5EE`, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "0.6rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-          <div style={{ width: "2.1rem", height: "2.1rem", borderRadius: "0.5rem", background: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <span style={{ fontFamily: "'Frank Ruhl Libre', serif", color: "#fff", fontWeight: 700, fontSize: "1.05rem" }}>₪</span>
-          </div>
+          <Logo size={36} />
           <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", fontSize: "1.15rem", fontWeight: 700, margin: 0 }}>לוח הבקרה הפיננסי</h1>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", color: SLATE, fontSize: "0.85rem", fontVariantNumeric: "tabular-nums" }}>
+          <Clock size={15} />
+          <span>{now.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
         </div>
         {searchOpen && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", background: "#F1F3F4", borderRadius: "0.6rem", padding: "0.4rem 0.8rem", flex: 1, maxWidth: "22rem", margin: "0 1rem" }}>
@@ -377,8 +558,8 @@ export default function FinanceJournal({ session }) {
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: "1.25rem", fontSize: "0.85rem" }}>
-          <span><span style={{ color: SLATE }}>הכנסות השבוע </span><b style={{ color: "#1E8E5A" }}>{formatILS(weekIncome)}</b></span>
-          <span><span style={{ color: SLATE }}>הוצאות השבוע </span><b style={{ color: "#C5453D" }}>{formatILS(weekExpense)}</b></span>
+          <span><span style={{ color: SLATE }}>{`הכנסות ${periodWordFor(viewMode)} `}</span><b style={{ color: "#1E8E5A" }}>{formatILS(periodIncome)}</b></span>
+          <span><span style={{ color: SLATE }}>{`הוצאות ${periodWordFor(viewMode)} `}</span><b style={{ color: "#C5453D" }}>{formatILS(periodExpense)}</b></span>
           <button onClick={() => supabase.auth.signOut()} title="התנתקות" style={{ border: "none", background: "none", cursor: "pointer", color: SLATE, display: "flex", alignItems: "center" }}><LogOut size={17} /></button>
         </div>
       </div>
@@ -434,7 +615,6 @@ export default function FinanceJournal({ session }) {
                 <span key={v} className="seg" onClick={() => setViewMode(v)} style={{ flex: 1, textAlign: "center", fontSize: "0.74rem", padding: "0.4rem 0.2rem", borderRadius: "0.4rem", background: viewMode === v ? ACCENT : "#EEF2FB", color: viewMode === v ? "#fff" : SLATE, cursor: "pointer" }}>{v}</span>
               ))}
             </div>
-            {viewMode !== "שבועי" && <div style={{ fontSize: "0.7rem", color: "#9AA0A6", padding: "0 0.9rem 0.8rem" }}>תצוגת {viewMode} תתווסף בהמשך.</div>}
           </div>
 
           <div style={{ background: "#fff", borderRadius: "0.6rem", border: "1px solid #E1E5EE" }}>
@@ -457,8 +637,18 @@ export default function FinanceJournal({ session }) {
 
         {/* LEFT area: graph + calendar */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1.7fr", gap: "1.1rem" }}>
+
           <div style={{ background: "#fff", borderRadius: "0.6rem", border: "1px solid #E1E5EE", padding: "1rem", height: "fit-content" }}>
-            <div style={{ fontSize: "0.76rem", fontWeight: 700, color: SLATE, marginBottom: "0.9rem" }}>לפי קטגוריה · שבוע {weekRangeLabel}</div>
+            <div style={{ fontSize: "0.76rem", fontWeight: 700, color: SLATE, marginBottom: "0.9rem" }}>לפי קטגוריה · {periodRange.label}</div>
+            {maxCatTotal > 1 && (
+              <div style={{ position: "relative", width: 150, height: 150, margin: "0 auto 1.2rem" }}>
+                <DonutChart data={categoryTotals.filter((c) => c.visible).map((c) => ({ value: c.total, color: c.color }))} size={150} strokeWidth={24} />
+                <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                  <div style={{ fontSize: "0.62rem", color: "#8A939C" }}>סה"כ</div>
+                  <div style={{ fontSize: "0.9rem", fontWeight: 700, color: INK }}>{formatILS(categoryTotals.filter((c) => c.visible).reduce((s, c) => s + c.total, 0))}</div>
+                </div>
+              </div>
+            )}
             {categoryTotals.filter((c) => c.visible).map((c) => (
               <div key={c.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.6rem" }}>
                 <span style={{ fontSize: "0.72rem", color: SLATE, width: "5.4rem", flexShrink: 0 }}>{c.label}</span>
@@ -468,52 +658,90 @@ export default function FinanceJournal({ session }) {
                 <span style={{ fontSize: "0.68rem", color: "#8A939C", width: "3.4rem", textAlign: "left" }}>{formatILS(c.total)}</span>
               </div>
             ))}
-            {weekEntries.length === 0 && <div style={{ fontSize: "0.75rem", color: "#9AA0A6", marginTop: "0.5rem" }}>אין תנועות השבוע.</div>}
+            {periodEntries.length === 0 && <div style={{ fontSize: "0.75rem", color: "#9AA0A6", marginTop: "0.5rem" }}>{noEntriesMessage(viewMode)}</div>}
           </div>
 
           <div style={{ background: "#fff", borderRadius: "0.6rem", border: "1px solid #E1E5EE", overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.7rem 1rem", borderBottom: "1px solid #EEF0F2" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <button onClick={() => shiftWeek(-1)} style={{ border: "none", background: "none", cursor: "pointer", color: SLATE }}><ChevronRight size={18} /></button>
-                <span style={{ fontWeight: 700, fontSize: "0.92rem" }}>{weekRangeLabel}</span>
-                <button onClick={() => shiftWeek(1)} style={{ border: "none", background: "none", cursor: "pointer", color: SLATE }}><ChevronLeft size={18} /></button>
+                <button onClick={() => shiftPeriod(-1)} style={{ border: "none", background: "none", cursor: "pointer", color: SLATE }}><ChevronRight size={18} /></button>
+                <span style={{ fontWeight: 700, fontSize: "0.92rem" }}>{periodRange.label}</span>
+                <button onClick={() => shiftPeriod(1)} style={{ border: "none", background: "none", cursor: "pointer", color: SLATE }}><ChevronLeft size={18} /></button>
               </div>
-              <span className="pill" onClick={() => jumpToDate(new Date())} style={{ fontSize: "0.72rem", color: ACCENT, padding: "0.25rem 0.6rem", border: `1px solid ${ACCENT}`, borderRadius: "0.4rem" }}>היום</span>
+              <span className="pill" onClick={goToday} style={{ fontSize: "0.72rem", color: ACCENT, padding: "0.25rem 0.6rem", border: `1px solid ${ACCENT}`, borderRadius: "0.4rem" }}>היום</span>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", minHeight: "26rem" }}>
-              {weekDays.map((d, i) => {
-                const dIso = iso(d);
-                const dayEntries = entriesByDay[dIso] || [];
-                const isToday = dIso === todayISO();
-                return (
-                  <div key={dIso} style={{ borderRight: i < 6 ? "1px solid #EEF0F2" : "none", display: "flex", flexDirection: "column" }}>
-                    <div style={{ textAlign: "center", padding: "0.5rem 0", borderBottom: "1px solid #EEF0F2", background: isToday ? "#EAF0FC" : "#FAFBFD" }}>
-                      <div style={{ fontSize: "0.66rem", color: "#8A939C" }}>{DAY_LABELS[i]}</div>
-                      <div style={{ fontSize: "0.85rem", fontWeight: isToday ? 700 : 500, color: isToday ? ACCENT : "#3C4043" }}>{d.getDate()}</div>
+
+            {viewMode === "שבועי" && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", minHeight: "26rem" }}>
+                {weekDays.map((d, i) => {
+                  const dIso = iso(d);
+                  const dayEntries = entriesByDay[dIso] || [];
+                  const isToday = dIso === todayISO();
+                  return (
+                    <div key={dIso} style={{ borderRight: i < 6 ? "1px solid #EEF0F2" : "none", display: "flex", flexDirection: "column" }}>
+                      <div style={{ textAlign: "center", padding: "0.5rem 0", borderBottom: "1px solid #EEF0F2", background: isToday ? "#EAF0FC" : "#FAFBFD" }}>
+                        <div style={{ fontSize: "0.66rem", color: "#8A939C" }}>{DAY_LABELS[i]}</div>
+                        <div style={{ fontSize: "0.85rem", fontWeight: isToday ? 700 : 500, color: isToday ? ACCENT : "#3C4043" }}>{d.getDate()}</div>
+                      </div>
+                      <div style={{ flex: 1, padding: "0.3rem", display: "flex", flexDirection: "column", gap: "0.25rem", overflowY: "auto" }}>
+                        {(remindersByDay[dIso] || []).map((r) => {
+                          const rs = reminderStatusMeta(r.status);
+                          return (
+                            <div key={r.id} className="chip" title="לחצו לעריכה, קליק ימני לאפשרויות" onClick={() => openEditReminderForm(r)} onContextMenu={(ev) => openContextMenu(ev, "reminder", r)} style={{ background: rs.color, borderRadius: "0.3rem", padding: "0.28rem 0.4rem", fontSize: "0.6rem", position: "relative", color: "#fff" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.2rem", fontWeight: 700 }}><Bell size={9} />{r.time}</div>
+                              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
+                              <button onClick={(ev) => { ev.stopPropagation(); deleteReminder(r.id); }} style={{ position: "absolute", top: "2px", left: "2px", border: "none", background: "none", cursor: "pointer", color: "#fff", opacity: 0.75, padding: 0 }}><Trash2 size={9} /></button>
+                            </div>
+                          );
+                        })}
+                        {dayEntries.map((e) => {
+                          const cat = catById(e.category);
+                          return (
+                            <div key={e.id} className="chip" title="לחצו לעריכה, קליק ימני לאפשרויות" onClick={() => openEditForm(e)} onContextMenu={(ev) => openContextMenu(ev, "entry", e)} style={{ background: cat.color, borderRadius: "0.3rem", padding: "0.3rem 0.4rem", fontSize: "0.62rem", position: "relative", color: "#fff" }}>
+                              <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.partyName || cat.label}</div>
+                              <div style={{ fontWeight: 700, opacity: 0.95 }}>{formatILS(e.amount)}</div>
+                              <button onClick={(ev) => { ev.stopPropagation(); deleteEntry(e.id); }} style={{ position: "absolute", top: "2px", left: "2px", border: "none", background: "none", cursor: "pointer", color: "#fff", opacity: 0.75, padding: 0 }}><Trash2 size={10} /></button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div style={{ flex: 1, padding: "0.3rem", display: "flex", flexDirection: "column", gap: "0.25rem", overflowY: "auto" }}>
-                      {(remindersByDay[dIso] || []).map((r) => (
-                        <div key={r.id} className="chip" title={r.notes || ""} style={{ background: "#FFF3CD", border: "1px solid #F0D98A", borderRadius: "0.3rem", padding: "0.28rem 0.4rem", fontSize: "0.6rem", position: "relative", color: "#6B5B23" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "0.2rem", fontWeight: 700 }}><Bell size={9} />{r.time}</div>
-                          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
-                          <button onClick={() => deleteReminder(r.id)} style={{ position: "absolute", top: "2px", left: "2px", border: "none", background: "none", cursor: "pointer", color: "#6B5B23", opacity: 0.6, padding: 0 }}><Trash2 size={9} /></button>
-                        </div>
-                      ))}
-                      {dayEntries.map((e) => {
-                        const cat = catById(e.category);
-                        return (
-                          <div key={e.id} className="chip" title={e.notes || ""} style={{ background: cat.color, borderRadius: "0.3rem", padding: "0.3rem 0.4rem", fontSize: "0.62rem", position: "relative", color: "#fff" }}>
-                            <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.partyName || cat.label}</div>
-                            <div style={{ fontWeight: 700, opacity: 0.95 }}>{formatILS(e.amount)}</div>
-                            <button onClick={() => deleteEntry(e.id)} style={{ position: "absolute", top: "2px", left: "2px", border: "none", background: "none", cursor: "pointer", color: "#fff", opacity: 0.75, padding: 0 }}><Trash2 size={10} /></button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {viewMode === "יומי" && (
+              <DayView
+                date={weekAnchor}
+                periodEntries={periodEntries}
+                reminders={reminders}
+                categories={categories}
+                onEditEntry={openEditForm}
+                onDeleteEntry={deleteEntry}
+                onEditReminder={openEditReminderForm}
+                onDeleteReminder={deleteReminder}
+                onContextMenuEntry={(ev, item) => openContextMenu(ev, "entry", item)}
+                onContextMenuReminder={(ev, item) => openContextMenu(ev, "reminder", item)}
+              />
+            )}
+
+            {viewMode === "חודשי" && (
+              <MonthView
+                monthCursor={monthCursor}
+                periodEntries={periodEntries}
+                reminders={reminders}
+                onPickDay={(d) => { jumpToDate(d); setViewMode("יומי"); }}
+              />
+            )}
+
+            {viewMode === "שנתי" && (
+              <YearView
+                yearCursor={yearCursor}
+                periodEntries={periodEntries}
+                onPickMonth={(d) => { jumpToDate(d); setViewMode("חודשי"); }}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -536,13 +764,37 @@ export default function FinanceJournal({ session }) {
       {fabOpen && <div onClick={() => setFabOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 35 }} />}
       {colorPickerFor && <div onClick={() => setColorPickerFor(null)} style={{ position: "fixed", inset: 0, zIndex: 15 }} />}
 
-      {/* Add transaction sheet */}
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <div onClick={closeContextMenu} onContextMenu={(ev) => { ev.preventDefault(); closeContextMenu(); }} style={{ position: "fixed", inset: 0, zIndex: 90 }}>
+          <div onClick={(ev) => ev.stopPropagation()} style={{ position: "fixed", top: contextMenu.y, left: contextMenu.x, zIndex: 91, background: "#fff", border: "1px solid #E1E5EE", borderRadius: "0.6rem", boxShadow: "0 8px 24px rgba(0,0,0,0.18)", minWidth: "10rem", overflow: "hidden" }}>
+            {contextMenu.kind === "reminder" && (
+              <>
+                {REMINDER_STATUSES.map((s) => (
+                  <button key={s.id} onClick={() => { markReminderStatus(contextMenu.item, s.id); closeContextMenu(); }} className="menu-btn" style={ctxMenuBtnStyle}>
+                    <span style={{ width: "0.7rem", height: "0.7rem", borderRadius: "50%", background: s.color, flexShrink: 0 }} />
+                    {`סמן כ${s.label}`}
+                  </button>
+                ))}
+                <div style={{ borderTop: "1px solid #EEF0F2" }} />
+              </>
+            )}
+            <button onClick={handleMenuEdit} className="menu-btn" style={ctxMenuBtnStyle}><Pencil size={14} /> עריכה</button>
+            <button onClick={handleMenuDuplicate} className="menu-btn" style={ctxMenuBtnStyle}><Copy size={14} /> שכפול</button>
+            <button onClick={handleMenuDelete} className="menu-btn" style={{ ...ctxMenuBtnStyle, color: "#C5453D" }}><Trash2 size={14} /> מחיקה</button>
+          </div>
+        </div>
+      )}
+
+      {/* Add/edit transaction sheet */}
       {showForm && (
-        <div onClick={() => setShowForm(false)} style={{ position: "fixed", inset: 0, background: "rgba(31,35,40,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "1rem" }}>
+        <div onClick={closeForm} style={{ position: "fixed", inset: 0, background: "rgba(31,35,40,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "1rem" }}>
           <div className="sheet-enter" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: "30rem", maxHeight: "90vh", overflowY: "auto", background: "#fff", borderRadius: "0.9rem", padding: "1.25rem", boxShadow: "0 12px 40px rgba(0,0,0,0.2)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-              <h2 style={{ fontSize: "1.05rem", fontWeight: 700, margin: 0, color: form.type === "income" ? "#1E8E5A" : "#C5453D" }}>{form.type === "income" ? "הוספת הכנסה" : "הוספת הוצאה"}</h2>
-              <button onClick={() => setShowForm(false)} style={{ border: "none", background: "none", cursor: "pointer", color: "#80868B" }}><X size={20} /></button>
+              <h2 style={{ fontSize: "1.05rem", fontWeight: 700, margin: 0, color: form.type === "income" ? "#1E8E5A" : "#C5453D" }}>
+                {editingEntryId ? (form.type === "income" ? "עריכת הכנסה" : "עריכת הוצאה") : (form.type === "income" ? "הוספת הכנסה" : "הוספת הוצאה")}
+              </h2>
+              <button onClick={closeForm} style={{ border: "none", background: "none", cursor: "pointer", color: "#80868B" }}><X size={20} /></button>
             </div>
 
             <FieldLabel>סכום</FieldLabel>
@@ -592,7 +844,7 @@ export default function FinanceJournal({ session }) {
 
             <div onClick={() => setShowMore((v) => !v)} style={{ display: "flex", alignItems: "center", gap: "0.3rem", cursor: "pointer", color: ACCENT, fontSize: "0.8rem", margin: "0.6rem 0 0.9rem" }}>
               <ChevronDown size={15} style={{ transform: showMore ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
-              {showMore ? "פחות פרטים" : "עוד פרטים (צ׳ק, אסמכתא, סטטוס...)"}
+              {showMore ? "פחות פרטים" : "עוד פרטים (צ׳ק, אסמכתא, סטטוס, התאמת בנק...)"}
             </div>
 
             {showMore && (
@@ -625,23 +877,43 @@ export default function FinanceJournal({ session }) {
                 <input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} style={inputStyle} />
                 <FieldLabel>הערות</FieldLabel>
                 <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+
+                <div style={{ marginTop: "0.6rem", marginBottom: "0.6rem", padding: "0.7rem", background: "#F8F9FA", borderRadius: "0.5rem", border: "1px solid #EEF0F2" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.75rem", fontWeight: 700, color: SLATE, marginBottom: "0.5rem" }}>
+                    <Landmark size={14} /> התאמות בנק
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.82rem", cursor: "pointer" }}>
+                    <input type="checkbox" checked={form.bankReconciled} onChange={(e) => setForm({ ...form, bankReconciled: e.target.checked, reconciliationDate: e.target.checked ? (form.reconciliationDate || todayISO()) : "" })} />
+                    הותאם מול דף חשבון הבנק
+                  </label>
+                  {form.bankReconciled && (
+                    <div style={{ marginTop: "0.5rem" }}>
+                      <FieldLabel>תאריך ההתאמה</FieldLabel>
+                      <input type="date" value={form.reconciliationDate} onChange={(e) => setForm({ ...form, reconciliationDate: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
+                    </div>
+                  )}
+                </div>
+
                 <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.78rem", color: "#80868B", marginBottom: "0.8rem" }}><Paperclip size={14} /> צירוף קובץ/קבלה — יתווסף בהמשך</div>
               </div>
             )}
 
             {error && <div style={{ color: "#C5453D", fontSize: "0.8rem", marginBottom: "0.7rem", textAlign: "center" }}>{error}</div>}
-            <button onClick={submitForm} style={{ width: "100%", padding: "0.85rem", borderRadius: "0.55rem", border: "none", background: form.type === "income" ? "#1E8E5A" : "#C5453D", color: "#fff", fontSize: "0.95rem", fontWeight: 600, cursor: "pointer", marginTop: "0.4rem" }}>שמירה</button>
+            <button onClick={submitForm} style={{ width: "100%", padding: "0.85rem", borderRadius: "0.55rem", border: "none", background: form.type === "income" ? "#1E8E5A" : "#C5453D", color: "#fff", fontSize: "0.95rem", fontWeight: 600, cursor: "pointer", marginTop: "0.4rem" }}>{editingEntryId ? "עדכון" : "שמירה"}</button>
+            {editingEntryId && (
+              <button onClick={() => deleteEntry(editingEntryId)} style={{ width: "100%", padding: "0.7rem", borderRadius: "0.55rem", border: "1px solid #E1E5EE", background: "#fff", color: "#C5453D", fontSize: "0.85rem", fontWeight: 600, cursor: "pointer", marginTop: "0.5rem" }}>מחיקת רשומה</button>
+            )}
           </div>
         </div>
       )}
 
-      {/* Reminder modal */}
+      {/* Add/edit reminder modal */}
       {showReminderForm && (
-        <div onClick={() => setShowReminderForm(false)} style={{ position: "fixed", inset: 0, background: "rgba(31,35,40,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "1rem" }}>
+        <div onClick={closeReminderForm} style={{ position: "fixed", inset: 0, background: "rgba(31,35,40,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "1rem" }}>
           <div className="sheet-enter" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: "26rem", maxHeight: "90vh", overflowY: "auto", background: "#fff", borderRadius: "0.9rem", padding: "1.25rem", boxShadow: "0 12px 40px rgba(0,0,0,0.2)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-              <h2 style={{ fontSize: "1.05rem", fontWeight: 700, margin: 0, color: "#8E24AA" }}>הוספת תזכורת</h2>
-              <button onClick={() => setShowReminderForm(false)} style={{ border: "none", background: "none", cursor: "pointer", color: "#80868B" }}><X size={20} /></button>
+              <h2 style={{ fontSize: "1.05rem", fontWeight: 700, margin: 0, color: "#8E24AA" }}>{editingReminderId ? "עריכת תזכורת" : "הוספת תזכורת"}</h2>
+              <button onClick={closeReminderForm} style={{ border: "none", background: "none", cursor: "pointer", color: "#80868B" }}><X size={20} /></button>
             </div>
             <FieldLabel>כותרת</FieldLabel>
             <input value={reminderForm.title} onChange={(e) => setReminderForm({ ...reminderForm, title: e.target.value })} placeholder='למשל: תשלום לספק, פגישה...' style={inputStyle} />
@@ -649,6 +921,16 @@ export default function FinanceJournal({ session }) {
               <div style={{ flex: 1 }}><FieldLabel>יום</FieldLabel><input type="date" value={reminderForm.date} onChange={(e) => setReminderForm({ ...reminderForm, date: e.target.value })} style={inputStyle} /></div>
               <div style={{ flex: 1 }}><FieldLabel>שעה</FieldLabel><input type="time" value={reminderForm.time} onChange={(e) => setReminderForm({ ...reminderForm, time: e.target.value })} style={inputStyle} /></div>
             </div>
+            <FieldLabel>סטטוס</FieldLabel>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.8rem" }}>
+              {REMINDER_STATUSES.map((s) => (
+                <span key={s.id} className="pill" onClick={() => setReminderForm({ ...reminderForm, status: s.id })} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.72rem", padding: "0.3rem 0.6rem", borderRadius: "0.4rem", border: reminderForm.status === s.id ? `1px solid ${s.color}` : "1px solid #DFE3E7", background: reminderForm.status === s.id ? `${s.color}18` : "#fff", color: reminderForm.status === s.id ? s.color : SLATE }}>
+                  <span style={{ width: "0.6rem", height: "0.6rem", borderRadius: "50%", background: s.color }} />
+                  {s.label}
+                </span>
+              ))}
+            </div>
+
             <FieldLabel>חזרתיות</FieldLabel>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.8rem" }}>
               {REPEAT_OPTIONS.map((o) => (
@@ -660,7 +942,10 @@ export default function FinanceJournal({ session }) {
             <FieldLabel>הערות</FieldLabel>
             <textarea value={reminderForm.notes} onChange={(e) => setReminderForm({ ...reminderForm, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical" }} />
             {error && <div style={{ color: "#C5453D", fontSize: "0.8rem", marginBottom: "0.7rem", textAlign: "center" }}>{error}</div>}
-            <button onClick={saveReminder} style={{ width: "100%", padding: "0.85rem", borderRadius: "0.55rem", border: "none", background: "#8E24AA", color: "#fff", fontSize: "0.95rem", fontWeight: 600, cursor: "pointer", marginTop: "0.4rem" }}>שמירת תזכורת</button>
+            <button onClick={saveReminder} style={{ width: "100%", padding: "0.85rem", borderRadius: "0.55rem", border: "none", background: "#8E24AA", color: "#fff", fontSize: "0.95rem", fontWeight: 600, cursor: "pointer", marginTop: "0.4rem" }}>{editingReminderId ? "עדכון תזכורת" : "שמירת תזכורת"}</button>
+            {editingReminderId && (
+              <button onClick={() => deleteReminder(editingReminderId)} style={{ width: "100%", padding: "0.7rem", borderRadius: "0.55rem", border: "1px solid #E1E5EE", background: "#fff", color: "#C5453D", fontSize: "0.85rem", fontWeight: 600, cursor: "pointer", marginTop: "0.5rem" }}>מחיקת תזכורת</button>
+            )}
           </div>
         </div>
       )}
@@ -765,6 +1050,134 @@ export default function FinanceJournal({ session }) {
   );
 }
 
+function DayView({ date, periodEntries, reminders, categories, onEditEntry, onDeleteEntry, onEditReminder, onDeleteReminder, onContextMenuEntry, onContextMenuReminder }) {
+  const dIso = iso(date);
+  const dayReminders = reminders.filter((r) => r.date === dIso).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+  return (
+    <div style={{ padding: "1rem", display: "flex", flexDirection: "column", gap: "0.6rem", minHeight: "24rem" }}>
+      {dayReminders.length === 0 && periodEntries.length === 0 && (
+        <div style={{ textAlign: "center", color: "#9AA0A6", fontSize: "0.85rem", padding: "3rem 0" }}>אין תנועות או תזכורות ביום זה.</div>
+      )}
+      {dayReminders.map((r) => {
+        const rs = reminderStatusMeta(r.status);
+        return (
+          <div key={r.id} onClick={() => onEditReminder(r)} onContextMenu={(ev) => onContextMenuReminder(ev, r)} style={{ display: "flex", alignItems: "center", gap: "0.6rem", background: rs.color, borderRadius: "0.5rem", padding: "0.6rem 0.8rem", cursor: "pointer", color: "#fff" }}>
+            <Bell size={15} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: "0.85rem" }}>{r.title}</div>
+              <div style={{ fontSize: "0.72rem", opacity: 0.9 }}>{r.time} · {rs.label}</div>
+            </div>
+            <button onClick={(ev) => { ev.stopPropagation(); onDeleteReminder(r.id); }} style={{ border: "none", background: "none", cursor: "pointer", color: "#fff", opacity: 0.85 }}><Trash2 size={14} /></button>
+          </div>
+        );
+      })}
+      {periodEntries.map((e) => {
+        const cat = categories.find((c) => c.id === e.category) || categories[categories.length - 1];
+        return (
+          <div key={e.id} onClick={() => onEditEntry(e)} onContextMenu={(ev) => onContextMenuEntry(ev, e)} style={{ display: "flex", alignItems: "center", gap: "0.6rem", background: `${cat.color}18`, borderRight: `4px solid ${cat.color}`, borderRadius: "0.5rem", padding: "0.6rem 0.8rem", cursor: "pointer" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: "0.85rem" }}>{e.partyName || cat.label}</div>
+              <div style={{ fontSize: "0.72rem", color: "#8A939C" }}>{cat.label}{e.notes ? ` · ${e.notes}` : ""}</div>
+            </div>
+            <div style={{ fontWeight: 700, fontSize: "0.95rem", color: e.amount < 0 ? "#C5453D" : "#1E8E5A" }}>{formatILS(e.amount)}</div>
+            <button onClick={(ev) => { ev.stopPropagation(); onDeleteEntry(e.id); }} style={{ border: "none", background: "none", cursor: "pointer", color: "#9AA0A6" }}><Trash2 size={14} /></button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MonthView({ monthCursor, periodEntries, reminders, onPickDay }) {
+  const gridStart = startOfWeek(startOfMonth(monthCursor));
+  const days = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
+  const dataByDay = {};
+  for (const d of days) dataByDay[iso(d)] = { income: 0, expense: 0, count: 0, reminders: 0 };
+  for (const e of periodEntries) {
+    if (dataByDay[e.valueDate]) {
+      if (e.amount > 0) dataByDay[e.valueDate].income += e.amount; else dataByDay[e.valueDate].expense += Math.abs(e.amount);
+      dataByDay[e.valueDate].count++;
+    }
+  }
+  for (const r of reminders) if (dataByDay[r.date]) dataByDay[r.date].reminders++;
+  const todayStr = todayISO();
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)" }}>
+        {DAY_LABELS.map((l) => (<div key={l} style={{ textAlign: "center", fontSize: "0.7rem", color: "#8A939C", padding: "0.4rem 0", borderBottom: "1px solid #EEF0F2" }}>{l}</div>))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)" }}>
+        {days.map((d, i) => {
+          const dIso = iso(d);
+          const inMonth = d.getMonth() === monthCursor.getMonth();
+          const isToday = dIso === todayStr;
+          const info = dataByDay[dIso];
+          return (
+            <div key={dIso} className="month-cell" onClick={() => onPickDay(d)} style={{ minHeight: "5.2rem", border: "1px solid #EEF0F2", padding: "0.3rem", cursor: "pointer", background: isToday ? "#EAF0FC" : "#fff", opacity: inMonth ? 1 : 0.4 }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: isToday ? 700 : 500, color: isToday ? ACCENT : "#3C4043" }}>{d.getDate()}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1px", marginTop: "0.2rem" }}>
+                {info.income > 0 && <div style={{ fontSize: "0.6rem", color: "#1E8E5A" }}>{`+${formatILS(info.income)}`}</div>}
+                {info.expense > 0 && <div style={{ fontSize: "0.6rem", color: "#C5453D" }}>{`-${formatILS(info.expense)}`}</div>}
+                {info.reminders > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "2px", fontSize: "0.58rem", color: "#8A6D1E" }}>
+                    <Bell size={8} /> {info.reminders}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function YearView({ yearCursor, periodEntries, onPickMonth }) {
+  const totals = Array.from({ length: 12 }, () => ({ income: 0, expense: 0 }));
+  for (const e of periodEntries) {
+    const d = new Date(e.valueDate + "T00:00:00");
+    if (d.getFullYear() !== yearCursor) continue;
+    if (e.amount > 0) totals[d.getMonth()].income += e.amount; else totals[d.getMonth()].expense += Math.abs(e.amount);
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.75rem", padding: "1rem" }}>
+      {totals.map((t, m) => {
+        const name = new Intl.DateTimeFormat("he-IL", { month: "long" }).format(new Date(yearCursor, m, 1));
+        return (
+          <div key={m} className="year-card" onClick={() => onPickMonth(new Date(yearCursor, m, 1))} style={{ border: "1px solid #EEF0F2", borderRadius: "0.6rem", padding: "0.85rem", cursor: "pointer", transition: "border-color 0.15s ease" }}>
+            <div style={{ fontWeight: 700, fontSize: "0.85rem", marginBottom: "0.5rem" }}>{name}</div>
+            <div style={{ fontSize: "0.74rem", color: "#1E8E5A" }}>{`+${formatILS(t.income)}`}</div>
+            <div style={{ fontSize: "0.74rem", color: "#C5453D" }}>{`-${formatILS(t.expense)}`}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DonutChart({ data, size = 150, strokeWidth = 24 }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  const radius = (size - strokeWidth) / 2;
+  const cx = size / 2, cy = size / 2;
+  const circumference = 2 * Math.PI * radius;
+  let offsetAccum = 0;
+  const segments = data.filter((d) => d.value > 0).map((d, i) => {
+    const fraction = d.value / total;
+    const dash = fraction * circumference;
+    const seg = { key: i, color: d.color, dash, gap: circumference - dash, offset: -offsetAccum };
+    offsetAccum += dash;
+    return seg;
+  });
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={cx} cy={cy} r={radius} fill="none" stroke="#EEF0F2" strokeWidth={strokeWidth} />
+      {segments.map((s) => (
+        <circle key={s.key} cx={cx} cy={cy} r={radius} fill="none" stroke={s.color} strokeWidth={strokeWidth} strokeDasharray={`${s.dash} ${s.gap}`} strokeDashoffset={s.offset} strokeLinecap="butt" />
+      ))}
+    </svg>
+  );
+}
+
 function MiniCalendar({ monthCursor, onPick, weekStart }) {
   const first = startOfMonth(monthCursor);
   const startOffset = first.getDay();
@@ -807,3 +1220,4 @@ function FieldLabel({ children }) {
   return <div style={{ fontSize: "0.72rem", color: SLATE, margin: "0.55rem 0 0.25rem" }}>{children}</div>;
 }
 const inputStyle = { width: "100%", padding: "0.55rem 0.7rem", borderRadius: "0.45rem", border: "1px solid #DFE3E7", background: "#F8F9FA", fontSize: "0.85rem", outline: "none", color: INK, marginBottom: "0.7rem" };
+const ctxMenuBtnStyle = { display: "flex", alignItems: "center", gap: "0.5rem", width: "100%", padding: "0.6rem 0.9rem", border: "none", background: "#fff", cursor: "pointer", fontSize: "0.85rem", textAlign: "right", color: INK };
